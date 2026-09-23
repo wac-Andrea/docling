@@ -4,18 +4,20 @@
 Pensado para corpus grandes que no se pueden revisar uno a uno: marca los
 documentos que van a dar problemas para que solo mires esos.
 
-Detecta:
-  - SIN TEXTO   : no tiene capa de texto (escaneado). extraer_pdf.py lo
-                  devolveria vacio, en silencio, porque no lleva OCR.
-  - POCO TEXTO  : muy pocos caracteres por pagina; suele ser un PDF mixto,
-                  con parte del contenido como imagen.
-  - ASTILLAS    : rectangulos degenerados que duplican caracteres. El filtro
-                  de extraer_pdf.py ya los elimina; aqui solo se informa.
-  - ILEGIBLE    : el fichero no se puede abrir.
+Estados posibles:
+  - SIN TEXTO      : ninguna pagina tiene capa de texto (escaneado completo).
+                     extraer_pdf.py lo devolveria vacio, en silencio.
+  - PAGINAS VACIAS : PDF mixto: algunas paginas son imagen. El resto se
+                     extrae bien, asi que nada delata lo que falta.
+  - ILEGIBLE       : el fichero no se puede abrir.
+  - OK             : todas las paginas tienen texto.
+
+Ademas cuenta las "astillas": rectangulos degenerados que duplican un
+caracter. extraer_pdf.py ya las filtra al extraer; aqui solo se informa.
 
 Uso:
     python auditar_corpus.py carpeta/
-    python auditar_corpus.py carpeta/ --csv informe.csv
+    python auditar_corpus.py carpeta/ --paginas 10 --csv informe.csv
 """
 
 from __future__ import annotations
@@ -39,7 +41,15 @@ def auditar(ruta: Path, max_paginas: int | None = None) -> dict:
 
     'max_paginas' limita la revision a las primeras N paginas.
     """
-    fila = {"fichero": ruta.name, "paginas": 0, "chars": 0, "astillas": 0, "estado": "", "detalle": ""}
+    fila = {
+        "fichero": ruta.name,
+        "paginas": 0,
+        "chars": 0,
+        "astillas": 0,
+        "paginas_vacias": 0,
+        "estado": "",
+        "detalle": "",
+    }
     try:
         doc = pdfium.PdfDocument(ruta)
     except Exception as exc:
@@ -48,6 +58,7 @@ def auditar(ruta: Path, max_paginas: int | None = None) -> dict:
         return fila
 
     muestras: list[str] = []
+    vacias: list[int] = []
     total = len(doc) if max_paginas is None else min(len(doc), max_paginas)
     for n in range(total):
         try:
@@ -55,7 +66,12 @@ def auditar(ruta: Path, max_paginas: int | None = None) -> dict:
         except Exception:
             continue
         fila["paginas"] += 1
-        fila["chars"] += tp.count_chars()
+        chars_pagina = tp.count_chars()
+        fila["chars"] += chars_pagina
+        # Idea tomada de WAC_DataLib (_is_vectorial_page): una pagina con menos
+        # de unas decenas de caracteres no tiene texto util, esta escaneada.
+        if chars_pagina < MINIMO_CHARS_POR_PAGINA:
+            vacias.append(n + 1)
         for i in range(tp.count_rects()):
             x0, y0, x1, y1 = tp.get_rect(i)
             if (y1 - y0) >= ALTURA_ASTILLA:
@@ -66,17 +82,36 @@ def auditar(ruta: Path, max_paginas: int | None = None) -> dict:
                 if len(muestras) < 3:
                     muestras.append(f"p.{n + 1}:{texto.strip()[:6]!r}")
 
-    por_pagina = fila["chars"] / fila["paginas"] if fila["paginas"] else 0
+    fila["paginas_vacias"] = len(vacias)
     if fila["chars"] == 0:
         fila["estado"] = "SIN TEXTO"
         fila["detalle"] = "escaneado: saldria vacio"
-    elif por_pagina < MINIMO_CHARS_POR_PAGINA:
-        fila["estado"] = "POCO TEXTO"
-        fila["detalle"] = f"{por_pagina:.0f} chars/pagina"
+    elif vacias:
+        # Lo peligroso de un PDF mixto es que el resto se extrae bien, asi que
+        # nada delata que esas paginas se han perdido.
+        listado = ",".join(str(p) for p in vacias[:6])
+        if len(vacias) > 6:
+            listado += f",+{len(vacias) - 6}"
+        fila["estado"] = "PAGINAS VACIAS"
+        fila["detalle"] = f"{len(vacias)}/{fila['paginas']} sin texto: p.{listado}"
     else:
         fila["estado"] = "OK"
         fila["detalle"] = " ".join(muestras)
     return fila
+
+
+# Las astillas no van al CSV: ya las filtra extraer_pdf.py al extraer, asi que
+# son ruido en un informe pensado para decidir que documentos revisar.
+COLUMNAS_CSV = ["fichero", "paginas", "chars", "paginas_vacias", "estado", "detalle"]
+
+
+def escribir_csv(filas: list[dict], destino: Path) -> None:
+    """Vuelca el informe, quedandose solo con las columnas accionables."""
+    destino.parent.mkdir(parents=True, exist_ok=True)
+    with destino.open("w", newline="", encoding="utf-8") as fh:
+        escritor = csv.DictWriter(fh, fieldnames=COLUMNAS_CSV, extrasaction="ignore")
+        escritor.writeheader()
+        escritor.writerows(filas)
 
 
 def main() -> None:
@@ -114,10 +149,7 @@ def main() -> None:
     print(f"  astillas  : {astillas} (filtradas al extraer)")
 
     if args.csv:
-        with args.csv.open("w", newline="", encoding="utf-8") as fh:
-            escritor = csv.DictWriter(fh, fieldnames=list(filas[0]))
-            escritor.writeheader()
-            escritor.writerows(filas)
+        escribir_csv(filas, args.csv)
         print(f"\nInforme completo: {args.csv}")
 
 
