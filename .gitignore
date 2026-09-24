@@ -1,0 +1,3 @@
+# Bytecode que Python genera solo al importar modulos
+__pycache__/
+*.py[cod]
