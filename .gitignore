@@ -1,3 +1,6 @@
 # Bytecode que Python genera solo al importar modulos
 __pycache__/
 *.py[cod]
+
+# Documentos de prueba: incluyen documentos reales de clientes
+docs-pruebas/
