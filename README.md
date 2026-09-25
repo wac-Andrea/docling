@@ -29,6 +29,10 @@ git ignora):
 - `imagenes/<nombre>/`: cada imagen como PNG.
 - `auditoria.csv`: el estado de la capa de texto de cada PDF.
 
+La raíz del `.json` lleva en `document` el título del documento, o `null` si
+no se reconoce: en Word, el párrafo con el estilo Título; en PDF, el primer
+encabezado si está en la primera página. `titulo` es el nombre del fichero.
+
 En el `.json`, cada imagen y cada tabla lleva su `numero` de orden en el
 documento. En los PDF llevan además `pagina`, `url` (abre el PDF en esa página)
 y `posicion`; las imágenes, también `url_imagen` con la ruta a su PNG. Los Word

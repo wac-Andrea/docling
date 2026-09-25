@@ -22,7 +22,7 @@ from docling_core.types.doc import (
 
 from ..extractors.images import GuardadorImagenes, bloque_imagen
 from ..extractors.tables import bloque_tabla, texto_tabla, ya_en_tabla
-from ..extractors.text import bloque_texto, grupo_en_linea, nodo_seccion, texto_de, unir_trozos
+from ..extractors.text import bloque_texto, grupo_en_linea, nodo_seccion, texto_de, titulo_documento, unir_trozos
 
 
 def construir_arbol(doc: DoclingDocument, documento: Path, guardador: GuardadorImagenes | None = None) -> dict:
@@ -32,6 +32,7 @@ def construir_arbol(doc: DoclingDocument, documento: Path, guardador: GuardadorI
     Nivel 0 = documento; los demas niveles, ver extractors.text.nodo_seccion.
     """
     raiz = {
+        "document": titulo_documento(doc),
         "titulo": doc.name,
         "nivel": 0,
         "pagina": None,

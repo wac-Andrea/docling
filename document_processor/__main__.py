@@ -163,6 +163,15 @@ def main() -> None:
         for r in sin_secciones:
             print(f"  {r['documento'].name}")
 
+    # Ver extractors.text.titulo_documento: en un Word solo cuenta el estilo
+    # Titulo; en un PDF, un encabezado en la primera pagina.
+    sin_titulo = [r for r in resultados if not r["vacio"] and r["arbol"]["document"] is None]
+    if sin_titulo:
+        print("\nAVISO: no se reconoce el titulo del documento en estos; en el")
+        print(".json 'document' sale a null:")
+        for r in sin_titulo:
+            print(f"  {r['documento'].name}")
+
 
 if __name__ == "__main__":
     main()

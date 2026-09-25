@@ -8,6 +8,7 @@ from docling_core.types.doc import (
     InlineGroup,
     ListGroup,
     ListItem,
+    SectionHeaderItem,
     TextItem,
     TitleItem,
 )
@@ -39,6 +40,26 @@ def nodo_seccion(item: DocItem) -> dict:
         "contenido": [],
         "subsecciones": [],
     }
+
+
+def titulo_documento(doc: DoclingDocument) -> str | None:
+    """Titulo del documento, o None si no se reconoce ninguno.
+
+    Si docling marca un titulo (un Word con el estilo 'Titulo'), es ese. En un
+    PDF el modelo de layout no lo distingue: sale como un encabezado mas, asi
+    que se toma el primer encabezado si esta en la primera pagina. Los
+    metadatos del fichero no sirven: suelen venir vacios o con cosas como
+    'Diapositiva 1' o 'Microsoft Word - informe.doc'.
+    """
+    encabezado = None
+    for item, _ in doc.iterate_items():
+        if isinstance(item, TitleItem) and texto_de(item):
+            return texto_de(item)
+        if encabezado is None and isinstance(item, SectionHeaderItem) and texto_de(item):
+            encabezado = item
+    if encabezado is not None and pagina_de(encabezado) == 1:
+        return texto_de(encabezado)
+    return None
 
 
 def grupo_en_linea(item: DocItem, doc: DoclingDocument) -> InlineGroup | None:
