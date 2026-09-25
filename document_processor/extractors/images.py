@@ -1,4 +1,4 @@
-"""Imagenes: su localizacion, su pie y el PNG guardado."""
+"""Images: their location, their caption and the saved PNG."""
 
 from __future__ import annotations
 
@@ -7,102 +7,102 @@ from pathlib import Path
 
 from docling_core.types.doc import DoclingDocument, PictureItem
 
-from .links import localizacion, url_de_fichero
+from .links import get_file_url, get_location
 
 
-class GuardadorImagenes:
-    """Guarda las imagenes detectadas y devuelve el nombre de cada fichero.
+class ImageSaver:
+    """Saves the detected images and returns the file name of each one.
 
-    Convencion de nombres tomada de WAC_DataLib (file2text/extractors/pdf.py):
-    'image{pagina}_{n}.png', para que los ficheros sean intercambiables con lo
-    que produce su extract_images().
+    Naming convention taken from WAC_DataLib (file2text/extractors/pdf.py):
+    'image{page}_{n}.png', so that the files are interchangeable with what its
+    extract_images() produces.
 
-    Dos imagenes identicas comparten fichero -- un logo repetido no se escribe
-    40 veces -- pero cada aparicion conserva su pagina en el JSON. La libreria
-    original descarta los duplicados por completo y con ellos su localizacion,
-    que es justo el dato que aqui interesa.
+    Two identical images share a file -- a repeated logo is not written 40
+    times -- but each occurrence keeps its page in the JSON. DataLib's
+    filter_unique_images drops duplicates entirely, and with them their
+    location, which is precisely the data that matters here.
     """
 
-    def __init__(self, destino: Path):
-        self.destino = destino
-        self.destino.mkdir(parents=True, exist_ok=True)
-        self._por_hash: dict[str, str] = {}
-        self._contador: dict[int, int] = {}
+    def __init__(self, save_dir: Path):
+        self.save_dir = save_dir
+        self.save_dir.mkdir(parents=True, exist_ok=True)
+        self._by_hash: dict[str, str] = {}
+        self._counter: dict[int, int] = {}
 
-    def guardar(self, item: PictureItem, doc: DoclingDocument, pagina: int | None) -> str | None:
-        imagen = item.get_image(doc)
-        if imagen is None:
+    def save(self, item: PictureItem, doc: DoclingDocument, page: int | None) -> str | None:
+        image = item.get_image(doc)
+        if image is None:
             return None
 
-        huella = hashlib.md5(imagen.tobytes()).hexdigest()
-        if huella in self._por_hash:
-            return self._por_hash[huella]
+        img_hash = hashlib.md5(image.tobytes()).hexdigest()
+        if img_hash in self._by_hash:
+            return self._by_hash[img_hash]
 
-        self._contador[pagina] = self._contador.get(pagina, 0) + 1
-        n = self._contador[pagina]
-        # Un .docx no tiene paginas: numeracion corrida 'image{n}.png', que es
-        # como nombra las imagenes docx2python en el extractor de Word de WAC_DataLib.
-        nombre = f"image{pagina}_{n}.png" if pagina is not None else f"image{n}.png"
-        imagen.save(self.destino / nombre)
-        self._por_hash[huella] = nombre
-        return nombre
+        self._counter[page] = self._counter.get(page, 0) + 1
+        n_img = self._counter[page]
+        # Without pages: running numbering 'image{n}.png', which is how
+        # docx2python names images in WAC_DataLib's Word extractor.
+        filename = f"image{page}_{n_img}.png" if page is not None else f"image{n_img}.png"
+        image.save(self.save_dir / filename)
+        self._by_hash[img_hash] = filename
+        return filename
 
-    def url_de(self, nombre: str | None) -> str | None:
-        """URL pinchable del PNG ya guardado.
+    def get_url(self, filename: str | None) -> str | None:
+        """Clickable URL of an already saved PNG.
 
-        'archivo' se queda con el nombre a secas, que es la convencion de
-        WAC_DataLib; esta es la ruta completa para poder abrirlo.
+        'filename' keeps just the name, which is WAC_DataLib's convention;
+        this is the full path so it can be opened.
         """
-        if nombre is None:
+        if filename is None:
             return None
-        return url_de_fichero(self.destino / nombre)
+        return get_file_url(self.save_dir / filename)
 
 
-def clasificacion(item: PictureItem) -> tuple[str | None, float | None]:
-    """Tipo de imagen segun DocumentFigureClassifier y su confianza (0-1).
+def get_classification(item: PictureItem) -> tuple[str | None, float | None]:
+    """Image type according to DocumentFigureClassifier and its confidence (0-1).
 
-    El modelo reparte la probabilidad entre 26 clases (logo, icon, photograph,
-    bar_chart, engineering_drawing, screenshot_from_computer...) y las devuelve
-    ordenadas de mayor a menor. Sirve para descartar logos y adornos de
-    maquetacion antes de indexar. Con confianza baja (p. ej. 'logo' 0.47 frente
-    a 'icon' 0.30) la clase es dudosa y conviene no filtrar solo por ella.
+    The model spreads the probability over 26 classes (logo, icon, photograph,
+    bar_chart, engineering_drawing, screenshot_from_computer...) and returns
+    them sorted from highest to lowest. Useful to drop logos and layout
+    decorations before indexing. With low confidence (e.g. 'logo' 0.47 versus
+    'icon' 0.30) the class is doubtful and it is better not to filter on it alone.
     """
-    clasif = item.meta.classification if item.meta else None
-    if not clasif or not clasif.predictions:
+    classification = item.meta.classification if item.meta else None
+    if not classification or not classification.predictions:
         return None, None
-    mejor = max(clasif.predictions, key=lambda p: p.confidence)
-    return mejor.class_name, round(mejor.confidence, 3)
+    best = max(classification.predictions, key=lambda p: p.confidence)
+    return best.class_name, round(best.confidence, 3)
 
 
-def bloque_imagen(
+def picture_block(
     item: PictureItem,
     doc: DoclingDocument,
-    documento: Path,
-    numero: int,
-    guardador: GuardadorImagenes | None = None,
+    filepath: Path,
+    number: int,
+    image_saver: ImageSaver | None = None,
 ) -> dict:
-    """Describe una imagen: donde esta, que es, como de grande y que pie tiene.
+    """Describe an image: where it is, what it is, how big it is and its caption.
 
-    La 'clase' (logo, photograph, bar_chart...) y el tamano sirven para
-    filtrar despues los adornos de maquetacion (vinetas, logos de pie de pagina).
+    The 'class_name' (logo, photograph, bar_chart...) and the size are useful
+    to filter out layout decorations later (bullets, footer logos).
 
-    'numero' es su orden entre las imagenes del documento.
+    'number' is its order among the images of the document.
     """
-    pagina, url, posicion = localizacion(item, documento)
-    clase, confianza = clasificacion(item)
-    bloque = {
-        "tipo": "picture",
-        "numero": numero,
-        "pagina": pagina,
+    page, url, position = get_location(item, filepath)
+    class_name, confidence = get_classification(item)
+    block = {
+        "type": "picture",
+        "number": number,
+        "page": page,
         "url": url,
-        "texto": (item.caption_text(doc) or "").strip(),
-        "clase": clase,
-        "confianza": confianza,
+        "text": (item.caption_text(doc) or "").strip(),
+        "class_name": class_name,
+        "confidence": confidence,
     }
-    if posicion:
-        bloque["posicion"] = posicion
-    if guardador is not None:
-        nombre = guardador.guardar(item, doc, pagina)
-        bloque["archivo"] = nombre          # nombre a secas (convencion WAC_DataLib)
-        bloque["url_imagen"] = guardador.url_de(nombre)  # ruta pinchable al PNG
-    return bloque
+    if position:
+        block["position"] = position
+    if image_saver is not None:
+        filename = image_saver.save(item, doc, page)
+        block["filename"] = filename  # bare name (WAC_DataLib convention)
+        block["image_url"] = image_saver.get_url(filename)  # clickable path to the PNG
+    return block

@@ -1,8 +1,9 @@
-"""PDF digital -> DoclingDocument, con la capa de texto nativa y sin OCR.
+"""Digital PDF -> DoclingDocument, with the native text layer and no OCR.
 
-Pensado para PDFs con capa de texto: sin OCR es rapido y el texto sale
-exactamente como lo escribio el generador del PDF. Un PDF escaneado no tiene
-esa capa y saldria vacio; el detector lo descarta antes con su auditoria.
+Meant for PDFs with a text layer: without OCR it is fast and the text comes
+out exactly as the PDF generator wrote it. A scanned PDF has no such layer
+and would come out empty; the detector rejects it beforehand
+(validate_vectorial_pdf).
 """
 
 from __future__ import annotations
@@ -19,98 +20,117 @@ from docling.datamodel.base_models import InputFormat
 from docling.datamodel.pipeline_options import HeadingHierarchyOptions, PdfPipelineOptions
 from docling.document_converter import DocumentConverter, PdfFormatOption
 
-from ..detector import ALTURA_MINIMA_CELDA
-from .base import guardar_resultados
+from ..detector import MIN_CELL_HEIGHT
+from ..errors import ExtractionError
+from .base import save_results
 
 
-class _PaginaPypdfiumLimpia(PyPdfiumPageBackend):
-    """Pagina de pypdfium2 sin los rectangulos degenerados (astillas)."""
+class _CleanPyPdfiumPageBackend(PyPdfiumPageBackend):
+    """pypdfium2 page without the degenerate rectangles (slivers)."""
 
     def _compute_text_cells(self):
-        celdas = super()._compute_text_cells()
-        return [c for c in celdas if abs(c.rect.to_bounding_box().height) >= ALTURA_MINIMA_CELDA]
+        cells = super()._compute_text_cells()
+        return [c for c in cells if abs(c.rect.to_bounding_box().height) >= MIN_CELL_HEIGHT]
 
 
-class PyPdfiumLimpioBackend(PyPdfiumDocumentBackend):
-    """pypdfium2 con el filtro de astillas aplicado a cada pagina."""
+class CleanPyPdfiumDocumentBackend(PyPdfiumDocumentBackend):
+    """pypdfium2 with the sliver filter applied to each page."""
 
     def load_page(self, page_no: int) -> PyPdfiumPageBackend:
         with pypdfium2_lock:
-            return _PaginaPypdfiumLimpia(self._pdoc, self.document_hash, page_no)
+            return _CleanPyPdfiumPageBackend(self._pdoc, self.document_hash, page_no)
 
 
-# Quien lee la capa de texto del PDF. No es un detalle menor: el backend por
-# defecto de docling ('docling-parse') se deja caracteres por el camino en
-# algunos PDFs -- tildes sueltas, letras de titulos -- que pypdfium2 si lee.
+# Which reader parses the PDF text layer. Not a minor detail: docling's
+# default backend ('docling-parse') drops characters in some PDFs -- stray
+# accents, letters of headings -- that pypdfium2 does read.
 BACKENDS = {
-    "pypdfium2": PyPdfiumLimpioBackend,
-    "pypdfium2-crudo": PyPdfiumDocumentBackend,
+    "pypdfium2": CleanPyPdfiumDocumentBackend,
+    "pypdfium2-raw": PyPdfiumDocumentBackend,
     "docling-parse": DoclingParseV4DocumentBackend,
 }
 
-TODAS_LAS_PAGINAS = (1, 2**31)
+ALL_PAGES = (1, 2**31)
 
 
-def crear_conversor(backend: str = "pypdfium2", escala: float = 2.0) -> DocumentConverter:
-    """Conversor de docling para PDF, con el OCR desactivado.
+def create_document_converter(backend: str = "pypdfium2", images_scale: float = 2.0) -> DocumentConverter:
+    """docling converter for PDF, with OCR disabled.
 
-    docling recorta ademas la region de cada figura para guardarla como PNG.
-    Recorta la zona detectada, no el bitmap incrustado: asi tambien salen los
-    diagramas hechos con vectores, que una extraccion de imagenes embebidas no ve.
+    docling also crops the region of each figure to save it as PNG. It crops
+    the detected area, not the embedded bitmap: that way diagrams made of
+    vectors come out too, which an embedded-image extraction does not see.
 
-    Cada figura pasa por DocumentFigureClassifier, que la etiqueta (logo,
-    photograph, bar_chart...): ver extractors.images.clasificacion.
+    Each figure goes through DocumentFigureClassifier, which labels it (logo,
+    photograph, bar_chart...): see extractors.images.get_classification.
 
-    El modelo de layout solo marca que algo es un titulo, no su nivel: sin mas,
-    todos los titulos de un PDF salen al mismo nivel. La etapa de jerarquia de
-    titulos se lo asigna con tres senales, por prioridad: marcadores del PDF
-    (su indice navegable), numeracion (8. > 8.1 > 8.1.1 > a.) y estilo. Acierta
-    sobre todo con titulos numerados; mezclando numerados y sin numerar puede
-    colgar un apartado de otro que es su hermano. Solo cambia niveles: el
-    texto de cada seccion no varia, solo la ruta de titulos padre.
+    The layout model only marks that something is a heading, not its level:
+    on its own, every heading of a PDF comes out at the same level. The
+    heading hierarchy stage assigns it from three signals, by priority: PDF
+    bookmarks (its navigable outline), numbering (8. > 8.1 > 8.1.1 > a.) and
+    style. It works best with numbered headings; mixing numbered and
+    unnumbered ones it may hang a section from what is really its sibling. It
+    only changes levels: the text of each section does not vary, only the
+    path of parent headings.
 
-    El estilo necesita las paginas analizadas (generate_parsed_pages). Con el
-    lector pypdfium2 no hay nombre de fuente, asi que ahi solo cuenta el tamano
-    de letra, no la negrita ni la cursiva.
+    Style needs the parsed pages (generate_parsed_pages). With the pypdfium2
+    reader there is no font name, so only the font size counts there, not
+    bold or italics.
     """
-    opciones = PdfPipelineOptions(do_ocr=False)
-    opciones.generate_picture_images = True
-    opciones.images_scale = escala
-    opciones.do_picture_classification = True
-    opciones.heading_hierarchy_options = HeadingHierarchyOptions(enabled=True)
-    opciones.generate_parsed_pages = True
+    options = PdfPipelineOptions(do_ocr=False)
+    options.generate_picture_images = True
+    options.images_scale = images_scale
+    options.do_picture_classification = True
+    options.heading_hierarchy_options = HeadingHierarchyOptions(enabled=True)
+    options.generate_parsed_pages = True
     return DocumentConverter(
         format_options={
             InputFormat.PDF: PdfFormatOption(
-                pipeline_options=opciones,
+                pipeline_options=options,
                 backend=BACKENDS[backend],
             )
         }
     )
 
 
-def parsear_paginas(valor: str) -> tuple[int, int]:
-    """Convierte '3' o '1-20' en el rango que espera docling."""
-    if "-" in valor:
-        inicio, fin = valor.split("-", 1)
-        return int(inicio), int(fin)
-    return int(valor), int(valor)
+def parse_page_range(value: str) -> tuple[int, int]:
+    """Turn '3' or '1-20' into the range docling expects."""
+    if "-" in value:
+        start, end = value.split("-", 1)
+        return int(start), int(end)
+    return int(value), int(value)
 
 
-def procesar_pdf(
-    pdf: Path,
-    salida: Path,
-    conversor: DocumentConverter,
-    paginas: tuple[int, int] = TODAS_LAS_PAGINAS,
-    nombre: str | None = None,
+def process_pdf(
+    filepath: Path,
+    output_dir: Path,
+    doc_converter: DocumentConverter,
+    page_range: tuple[int, int] = ALL_PAGES,
+    output_name: str | None = None,
+    original_filepath: Path | None = None,
 ) -> dict:
-    """Extrae un PDF y escribe su .md, su .json y sus imagenes en 'salida'.
+    """Extract a PDF and write its .md, its .json and its images to 'output_dir'.
 
-    Recibe el conversor ya construido en vez de crearlo: cargar los modelos de
-    layout cuesta varios segundos, y al procesar una carpeta interesa pagarlo
-    una sola vez para todos los documentos.
+    It takes the docling converter already built instead of creating it:
+    loading the layout models takes several seconds, and when processing a
+    folder it pays to do it only once for all the documents.
+
+    'original_filepath' is the file the user gave when 'filepath' is its
+    conversion (converters.file2pdf): the 'title' of the tree comes from it.
+    The URLs still point to 'filepath', which is the one with pages.
+
+    Raises
+    ------
+    ExtractionError
+        If docling cannot convert the PDF or writing the outputs fails.
     """
-    doc = conversor.convert(pdf, page_range=paginas).document
-    res = guardar_resultados(doc, pdf, salida, nombre)
-    res["paginas"] = len(doc.pages)
-    return res
+    source = original_filepath or filepath
+    try:
+        doc = doc_converter.convert(filepath, page_range=page_range).document
+        if original_filepath is not None:
+            doc.name = original_filepath.stem
+        result = save_results(doc, filepath, output_dir, output_name)
+    except Exception as e:
+        raise ExtractionError(f"Could not extract {source.name}: {type(e).__name__}: {e}", source, e) from e
+    result["filepath"] = source
+    result["pages"] = len(doc.pages)
+    return result

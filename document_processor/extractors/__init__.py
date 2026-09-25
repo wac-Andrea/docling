@@ -1,6 +1,6 @@
-"""Extractores: cada uno convierte un tipo de elemento del DoclingDocument
-(texto, imagen, tabla) en un bloque del .json, o calcula sus enlaces.
+"""Extractors: each one turns a kind of DoclingDocument item (text, image,
+table) into a block of the .json, or computes its links.
 
-Trabajan sobre el modelo interno de docling y no sobre el fichero original,
-asi que valen igual para PDF y para Word.
+They work on docling's internal model, not on the source file, so they are
+the same for any input format.
 """

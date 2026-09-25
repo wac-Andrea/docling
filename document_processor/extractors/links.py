@@ -1,9 +1,9 @@
-"""Enlaces y localizacion de cada elemento en el documento original.
+"""Links and location of each item in the source document.
 
-Todas las URLs que aparecen en el .json salen de aqui:
-  - 'url'        : abre el documento original en la pagina del elemento.
-  - 'url_imagen' : ruta al PNG guardado de una imagen.
-Y tambien la 'posicion' (caja en puntos) de imagenes y tablas.
+Every URL in the .json comes from here:
+  - 'url'       : opens the source document at the item's page.
+  - 'image_url' : path to the saved PNG of an image.
+And also the 'position' (box in points) of images and tables.
 """
 
 from __future__ import annotations
@@ -13,38 +13,38 @@ from pathlib import Path
 from docling_core.types.doc import DocItem
 
 
-def url_de_fichero(ruta: Path) -> str:
-    """URL file:// pinchable de un fichero local."""
-    return ruta.resolve().as_uri()
+def get_file_url(filepath: Path) -> str:
+    """Clickable file:// URL of a local file."""
+    return filepath.resolve().as_uri()
 
 
-def url_de_pagina(documento: Path, pagina: int | None) -> str | None:
-    """URL que abre el documento directamente en esa pagina.
+def get_page_url(filepath: Path, page: int | None) -> str | None:
+    """URL that opens the document directly at that page.
 
-    El fragmento '#page=N' es un parametro estandar de apertura de PDF: lo
-    entienden los navegadores y Acrobat, asi que el enlace es pinchable. Los
-    formatos sin paginas (Word) llegan con pagina None y no tienen URL.
+    The '#page=N' fragment is a standard PDF open parameter: browsers and
+    Acrobat understand it, so the link is clickable. Formats without pages
+    arrive with page None and have no URL.
     """
-    if pagina is None:
+    if page is None:
         return None
-    return f"{url_de_fichero(documento)}#page={pagina}"
+    return f"{get_file_url(filepath)}#page={page}"
 
 
-def localizacion(item: DocItem, documento: Path) -> tuple[int | None, str | None, dict | None]:
-    """Donde esta el elemento en el original: pagina, enlace a ella y caja.
+def get_location(item: DocItem, filepath: Path) -> tuple[int | None, str | None, dict | None]:
+    """Where the item is in the source: page, link to it and box.
 
-    Solo los formatos con paginas (PDF) tienen esta informacion. En un Word
-    los tres valores salen a None, y la unica referencia es el 'numero' de
-    orden que pone construir_arbol.
+    Only formats with pages (PDF) have this information. Otherwise the three
+    values are None, and the only reference is the 'number' that build_tree
+    assigns.
     """
     prov = item.prov[0] if item.prov else None
     if prov is None:
         return None, None, None
-    caja = prov.bbox
-    posicion = {
-        "x": round(caja.l, 1),
-        "y": round(caja.b, 1),
-        "ancho": round(abs(caja.r - caja.l), 1),
-        "alto": round(abs(caja.t - caja.b), 1),
+    box = prov.bbox
+    position = {
+        "x": round(box.l, 1),
+        "y": round(box.b, 1),
+        "width": round(abs(box.r - box.l), 1),
+        "height": round(abs(box.t - box.b), 1),
     }
-    return prov.page_no, url_de_pagina(documento, prov.page_no), posicion
+    return prov.page_no, get_page_url(filepath, prov.page_no), position

@@ -1,4 +1,4 @@
-# Aqui se escriben los resultados (<documento>.json, .md, imagenes/...).
-# No se suben al repositorio.
+# Results are written here (<document>.json, .md, images/, pdf/...).
+# They are not pushed to the repository.
 *
 !.gitignore

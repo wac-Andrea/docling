@@ -1,4 +1,4 @@
-"""Texto: titulos de seccion, parrafos y puntos de lista."""
+"""Text: section headings, paragraphs and list items."""
 
 from __future__ import annotations
 
@@ -14,120 +14,119 @@ from docling_core.types.doc import (
 )
 
 
-def pagina_de(item: DocItem) -> int | None:
-    """Numero de pagina donde aparece el elemento (None si no hay procedencia)."""
+def get_page(item: DocItem) -> int | None:
+    """Page number where the item appears (None if it has no provenance)."""
     prov = getattr(item, "prov", None)
     return prov[0].page_no if prov else None
 
 
-def texto_de(item: DocItem) -> str:
-    """Texto del elemento, sin espacios en los bordes."""
+def get_text(item: DocItem) -> str:
+    """Text of the item, stripped of surrounding whitespace."""
     return (getattr(item, "text", "") or "").strip()
 
 
-def nodo_seccion(item: DocItem) -> dict:
-    """Nodo del arbol para un titulo o encabezado de seccion.
+def section_node(item: DocItem) -> dict:
+    """Tree node for a title or section heading.
 
-    Nivel 1 = titulo del documento, 2+ = encabezados de seccion. La profundidad
-    sale del 'level' que asigna docling: en un PDF lo decide su modelo de
-    layout; en un Word, los estilos de titulo del documento.
+    Level 1 = document title, 2+ = section headings. The depth comes from the
+    'level' docling assigns: in a PDF, its layout model and heading hierarchy
+    stage decide it; in a Word, the document's heading styles.
     """
-    nivel = 1 if isinstance(item, TitleItem) else item.level + 1
+    level = 1 if isinstance(item, TitleItem) else item.level + 1
     return {
-        "titulo": texto_de(item),
-        "nivel": nivel,
-        "pagina": pagina_de(item),
-        "contenido": [],
-        "subsecciones": [],
+        "title": get_text(item),
+        "level": level,
+        "page": get_page(item),
+        "content": [],
+        "subsections": [],
     }
 
 
-def titulo_documento(doc: DoclingDocument) -> str | None:
-    """Titulo del documento, o None si no se reconoce ninguno.
+def get_document_title(doc: DoclingDocument) -> str | None:
+    """Title of the document, or None if none is recognized.
 
-    Si docling marca un titulo (un Word con el estilo 'Titulo'), es ese. En un
-    PDF el modelo de layout no lo distingue: sale como un encabezado mas, asi
-    que se toma el primer encabezado si esta en la primera pagina. Los
-    metadatos del fichero no sirven: suelen venir vacios o con cosas como
-    'Diapositiva 1' o 'Microsoft Word - informe.doc'.
+    If docling marks a title (a Word with the 'Title' style), that one. In a
+    PDF the layout model does not tell it apart: it comes out as one more
+    heading, so the first heading is taken if it is on the first page. The
+    file metadata is useless: it is usually empty or holds things like
+    'Diapositiva 1' or 'Microsoft Word - informe.doc'.
     """
-    encabezado = None
+    heading = None
     for item, _ in doc.iterate_items():
-        if isinstance(item, TitleItem) and texto_de(item):
-            return texto_de(item)
-        if encabezado is None and isinstance(item, SectionHeaderItem) and texto_de(item):
-            encabezado = item
-    if encabezado is not None and pagina_de(encabezado) == 1:
-        return texto_de(encabezado)
+        if isinstance(item, TitleItem) and get_text(item):
+            return get_text(item)
+        if heading is None and isinstance(item, SectionHeaderItem) and get_text(item):
+            heading = item
+    if heading is not None and get_page(heading) == 1:
+        return get_text(heading)
     return None
 
 
-def grupo_en_linea(item: DocItem, doc: DoclingDocument) -> InlineGroup | None:
-    """Parrafo al que pertenece el elemento si es un trozo de uno partido.
+def get_inline_group(item: DocItem, doc: DoclingDocument) -> InlineGroup | None:
+    """Paragraph the item belongs to, if it is a fragment of a split one.
 
-    docling parte en trozos los parrafos con formatos mezclados (una palabra en
-    negrita, un enlace...) para no perder ese formato: cada trozo es un
-    elemento distinto, y todos cuelgan de un mismo InlineGroup.
+    docling splits paragraphs with mixed formatting (a bold word, a link...)
+    into fragments so as not to lose that formatting: each fragment is a
+    separate item, and all of them hang from the same InlineGroup.
     """
-    padre = item.parent.resolve(doc) if item.parent else None
-    return padre if isinstance(padre, InlineGroup) else None
+    parent = item.parent.resolve(doc) if item.parent else None
+    return parent if isinstance(parent, InlineGroup) else None
 
 
-# Signos que van pegados al trozo anterior o al siguiente, sin espacio.
-SIN_ESPACIO_ANTES = tuple(",.;:)]}»”?!%…")
-SIN_ESPACIO_DESPUES = tuple("([{«“¿¡")
+# Punctuation attached to the previous or next fragment, with no space.
+NO_SPACE_BEFORE = tuple(",.;:)]}»”?!%…")
+NO_SPACE_AFTER = tuple("([{«“¿¡")
 
 
-def unir_trozos(anterior: str, siguiente: str) -> str:
-    """Une dos trozos de un parrafo partido.
+def join_fragments(previous: str, following: str) -> str:
+    """Join two fragments of a split paragraph.
 
-    docling guarda cada trozo sin los espacios de los bordes, asi que no se
-    sabe si en el original habia uno entre ellos. Se pone uno, salvo junto a
-    signos de puntuacion: 'extranjeros' + ', con el fin' no debe dar
+    docling stores each fragment without its surrounding whitespace, so there
+    is no knowing whether the original had one between them. One is added,
+    except next to punctuation: 'extranjeros' + ', con el fin' must not give
     'extranjeros , con el fin'.
     """
-    if siguiente.startswith(SIN_ESPACIO_ANTES) or anterior.endswith(SIN_ESPACIO_DESPUES):
-        return anterior + siguiente
-    return f"{anterior} {siguiente}"
+    if following.startswith(NO_SPACE_BEFORE) or previous.endswith(NO_SPACE_AFTER):
+        return previous + following
+    return f"{previous} {following}"
 
 
-def nivel_de_lista(punto: ListItem, doc: DoclingDocument) -> int:
-    """Profundidad del punto: 1 = lista principal, 2 = sublista, etc.
+def get_list_level(list_item: ListItem, doc: DoclingDocument) -> int:
+    """Depth of the list item: 1 = main list, 2 = sublist, etc.
 
-    Cada lista es un ListGroup, y una sublista cuelga del punto que la
-    contiene, asi que basta con contar los ListGroup que hay por encima.
-    Con ella se reconstruye quien es padre de quien, igual que con el
-    'nivel' de las secciones: el padre de un punto es el ultimo punto
-    anterior con un nivel menos.
+    Each list is a ListGroup, and a sublist hangs from the item that contains
+    it, so counting the ListGroups above is enough. With it the parent of each
+    item can be rebuilt, just like with the 'level' of sections: the parent
+    of an item is the last previous item one level up.
     """
-    nivel, padre = 0, punto.parent
-    while padre is not None:
-        nodo = padre.resolve(doc)
-        if isinstance(nodo, ListGroup):
-            nivel += 1
-        padre = nodo.parent
-    return max(nivel, 1)
+    level, parent = 0, list_item.parent
+    while parent is not None:
+        node = parent.resolve(doc)
+        if isinstance(node, ListGroup):
+            level += 1
+        parent = node.parent
+    return max(level, 1)
 
 
-def bloque_texto(item: TextItem, doc: DoclingDocument, texto: str, grupo: InlineGroup | None) -> dict:
-    """Bloque de un parrafo o de un punto de lista.
+def text_block(item: TextItem, doc: DoclingDocument, text: str, group: InlineGroup | None) -> dict:
+    """Block for a paragraph or a list item.
 
-    'grupo' es el InlineGroup si 'item' es el primer trozo de un parrafo
-    partido; los trozos siguientes los va anadiendo construir_arbol.
+    'group' is the InlineGroup if 'item' is the first fragment of a split
+    paragraph; build_tree appends the following fragments.
     """
-    # Punto de lista al que pertenece el texto: el propio elemento o, si es un
-    # parrafo partido, el ListItem del que cuelgan los trozos (llega vacio: su
-    # texto va en ellos).
-    punto = item if isinstance(item, ListItem) else None
-    if grupo is not None and isinstance(grupo.parent.resolve(doc), ListItem):
-        punto = grupo.parent.resolve(doc)
+    # List item the text belongs to: the item itself or, for a split
+    # paragraph, the ListItem the fragments hang from (it arrives empty: its
+    # text is in them).
+    list_item = item if isinstance(item, ListItem) else None
+    if group is not None and isinstance(group.parent.resolve(doc), ListItem):
+        list_item = group.parent.resolve(doc)
 
-    if punto is not None:
+    if list_item is not None:
         return {
-            "tipo": "list_item",
-            "nivel": nivel_de_lista(punto, doc),
-            "marcador": (punto.marker or "").strip(),
-            "pagina": pagina_de(item),
-            "texto": texto,
+            "type": "list_item",
+            "level": get_list_level(list_item, doc),
+            "marker": (list_item.marker or "").strip(),
+            "page": get_page(item),
+            "text": text,
         }
-    return {"tipo": item.label.value, "pagina": pagina_de(item), "texto": texto}  # text, caption...
+    return {"type": item.label.value, "page": get_page(item), "text": text}  # text, caption...

@@ -1,251 +1,305 @@
-"""Que es cada fichero y si se puede procesar, antes de extraer nada.
+"""What each file is and whether it can be processed, before extracting anything.
 
-  - Tipo real de cada fichero (PDF o Word) por su contenido, no solo por la
-    extension: los renombrados o danados se saltan antes de gastar tiempo.
-  - Nombres de salida sin choques cuando dos documentos se llaman igual.
-  - Auditoria de la capa de texto de los PDF: marca los que no se van a poder
-    extraer (escaneados, ilegibles) para no procesarlos a ciegas.
+  - Real type of each file (PDF, Word or plain text) by its content, not only
+    by its extension: renamed or corrupted files are skipped before wasting
+    time on them. Whatever is not a PDF is then converted to PDF
+    (converters.file2pdf).
+  - Output names without clashes when two documents have the same name.
+  - Audit of the PDF text layer: flags those that cannot be extracted
+    (scanned, unreadable) so they are not processed blindly.
 
-La auditoria tambien se puede lanzar sola, sin extraer:
-    python -m document_processor.detector carpeta/ --paginas 10 --csv informe.csv
+As in WAC_DataLib, what cannot be processed is reported with an exception
+(see errors.py), not with a report: the caller decides whether to log it.
+
+The audit can also be run on its own, without extracting, to review a corpus:
+    python -m document_processor.detector folder/ --pages 10
 """
 
 from __future__ import annotations
 
 import argparse
-import csv
 from collections import Counter
 from pathlib import Path
 
 import pypdfium2 as pdfium
 
-# Primeros bytes que debe tener cada formato. La extension la puede cambiar
-# cualquiera; el contenido no engana. Un .doc puede ser en realidad un RTF --
-# Word guarda asi a veces --, y el conversor lo abre igual.
-FIRMAS = {
+from .errors import ExtractionError, NotVectorialError, UnsupportedFormatError
+
+# First bytes each format must have. Anyone can change the extension; the
+# content does not lie. A .doc may actually be an RTF -- Word sometimes saves
+# it that way --, and the converter opens it all the same.
+SIGNATURES = {
     ".pdf": (b"%PDF",),
     ".docx": (b"PK\x03\x04",),
     ".doc": (b"\xd0\xcf\x11\xe0", b"{\\rtf"),
     ".rtf": (b"{\\rtf",),
 }
 
+# Extensions that are processed. A .txt has no signature: see get_file_type.
+SUPPORTED_EXTENSIONS = {*SIGNATURES, ".txt"}
 
-def tipo_de(ruta: Path) -> str | None:
-    """'pdf' o 'word' si el contenido cuadra con la extension; si no, None.
 
-    Detecta ficheros renombrados o danados antes de gastar tiempo en ellos. Un
-    .docx protegido con contrasena tampoco pasa: va cifrado dentro de un
-    contenedor que no es el de un .docx, y docling no podria abrirlo.
+def detect_text_encoding(filepath: Path) -> str | None:
+    """Encoding of a plain text file, or None if it is not text.
+
+    UTF-8 is tried first, the usual one today, and if it does not fit,
+    Windows-1252, what old programs on Windows tend to leave. A file with
+    null bytes and no UTF-16 mark is binary, not text.
     """
-    extension = ruta.suffix.lower()
-    firmas = FIRMAS.get(extension)
-    if firmas is None:
+    data = filepath.read_bytes()
+    if data.startswith((b"\xff\xfe", b"\xfe\xff")):
+        return "utf-16"
+    if b"\x00" in data:
         return None
-    with ruta.open("rb") as f:
-        cabecera = f.read(1024)
-    if extension == ".pdf":
-        # La norma permite algo de basura antes de '%PDF' en el primer KB.
-        valido = b"%PDF" in cabecera
+    try:
+        data.decode("utf-8")
+        return "utf-8"
+    except UnicodeDecodeError:
+        pass
+    try:
+        data.decode("cp1252")
+        return "cp1252"
+    except UnicodeDecodeError:  # bytes not even cp1252 defines: not text
+        return None
+
+
+def get_file_type(filepath: Path) -> str:
+    """'pdf', 'word' or 'text', if the content matches the extension.
+
+    Detects renamed or corrupted files before wasting time on them. A
+    password-protected .docx does not pass either: it is encrypted inside a
+    container that is not a .docx one, and it could not be converted.
+
+    Raises
+    ------
+    UnsupportedFormatError
+        If the extension is not processed or the content does not match it.
+    """
+    ext = filepath.suffix.lower()
+    if ext not in SUPPORTED_EXTENSIONS:
+        raise UnsupportedFormatError(
+            f"Unsupported file format: {ext or '(no extension)'}. "
+            f"Supported formats: {', '.join(sorted(SUPPORTED_EXTENSIONS))}"
+        )
+    if ext == ".txt":
+        # A .txt has no signature: it is enough that it can be read as text.
+        valid = detect_text_encoding(filepath) is not None
     else:
-        valido = cabecera.startswith(firmas)
-    if not valido:
-        return None
-    return "pdf" if extension == ".pdf" else "word"
+        with filepath.open("rb") as f:
+            header = f.read(1024)
+        if ext == ".pdf":
+            # The standard allows some garbage before '%PDF' in the first KB.
+            valid = b"%PDF" in header
+        else:
+            valid = header.startswith(SIGNATURES[ext])
+    if not valid:
+        raise UnsupportedFormatError(f"The content of {filepath.name} is not a valid {ext}")
+    if ext == ".pdf":
+        return "pdf"
+    return "text" if ext == ".txt" else "word"
 
 
-def listar_documentos(ruta: Path) -> list[Path]:
-    """Documentos de una carpeta (con subcarpetas), o el fichero suelto.
+def list_documents(path: Path) -> list[Path]:
+    """Documents of a folder (with subfolders), or the single file.
 
-    Se saltan los '~$...' que deja Word mientras un documento esta abierto:
-    tienen extension .docx pero son ficheros de bloqueo, no documentos.
+    The '~$...' files Word leaves while a document is open are skipped: they
+    have a .docx extension but are lock files, not documents.
     """
-    if ruta.is_file():
-        return [ruta]
+    if path.is_file():
+        return [path]
     return sorted(
-        p for p in ruta.rglob("*")
-        if p.is_file() and p.suffix.lower() in FIRMAS and not p.name.startswith("~$")
+        p for p in path.rglob("*")
+        if p.is_file() and p.suffix.lower() in SUPPORTED_EXTENSIONS and not p.name.startswith("~$")
     )
 
 
-def nombres_de_salida(documentos: list[Path]) -> dict[Path, str]:
-    """Nombre de los ficheros de salida de cada documento, sin choques.
+def get_output_names(filepaths: list[Path]) -> dict[Path, str]:
+    """Name of the output files of each document, without clashes.
 
-    Si en la carpeta estan 'informe.pdf' e 'informe.docx' -- un Word y el PDF
-    exportado de el, algo habitual --, los dos escribirian 'informe.json'.
-    En ese caso se anade la extension: 'informe-pdf.json', 'informe-docx.json'.
-    Se compara sin mayusculas porque en Windows 'A.json' y 'a.json' son el
-    mismo fichero.
+    If the folder holds 'informe.pdf' and 'informe.docx' -- a Word and the PDF
+    exported from it, a common case --, both would write 'informe.json'. In
+    that case the extension is added: 'informe-pdf.json', 'informe-docx.json'.
+    Comparison ignores case because on Windows 'A.json' and 'a.json' are the
+    same file.
     """
-    repeticiones = Counter(p.stem.lower() for p in documentos)
-    nombres: dict[Path, str] = {}
-    usados: set[str] = set()
-    for p in documentos:
-        base = p.stem if repeticiones[p.stem.lower()] == 1 else f"{p.stem}-{p.suffix.lstrip('.').lower()}"
-        nombre, n = base, 2
-        while nombre.lower() in usados:  # mismo nombre y extension en otra subcarpeta
-            nombre, n = f"{base}-{n}", n + 1
-        usados.add(nombre.lower())
-        nombres[p] = nombre
-    return nombres
+    repetitions = Counter(p.stem.lower() for p in filepaths)
+    names: dict[Path, str] = {}
+    used: set[str] = set()
+    for p in filepaths:
+        base = p.stem if repetitions[p.stem.lower()] == 1 else f"{p.stem}-{p.suffix.lstrip('.').lower()}"
+        name, n = base, 2
+        while name.lower() in used:  # same name and extension in another subfolder
+            name, n = f"{base}-{n}", n + 1
+        used.add(name.lower())
+        names[p] = name
+    return names
 
 
-# --- Auditoria de la capa de texto de los PDF -------------------------------
+# --- Audit of the PDF text layer --------------------------------------------
 
-AYUDA_AUDITORIA = """Audita una carpeta de PDFs antes de procesarlos, sin abrirlos a mano.
+AUDIT_HELP = """Audit a folder of PDFs before processing them, without opening them by hand.
 
-Pensado para corpus grandes que no se pueden revisar uno a uno: marca los
-documentos que van a dar problemas para que solo mires esos.
+Meant for large corpora that cannot be reviewed one by one: flags the
+documents that will cause trouble so you only look at those.
 
-Estados posibles:
-  - SIN TEXTO      : ninguna pagina tiene capa de texto (escaneado completo).
-                     La extraccion lo devolveria vacio, en silencio.
-  - PAGINAS VACIAS : PDF mixto: algunas paginas son imagen. El resto se
-                     extrae bien, asi que nada delata lo que falta.
-  - ILEGIBLE       : el fichero no se puede abrir.
-  - OK             : todas las paginas tienen texto.
+Possible statuses:
+  - NO TEXT     : no page has a text layer (fully scanned).
+                  Extraction would return it empty, silently.
+  - EMPTY PAGES : mixed PDF: some pages are images. The rest is extracted
+                  fine, so nothing gives away what is missing.
+  - UNREADABLE  : the file cannot be opened.
+  - OK          : every page has text.
 
-Ademas cuenta las "astillas": rectangulos degenerados que duplican un
-caracter. El procesador de PDF ya las filtra al extraer; aqui solo se informa.
+It also counts the "slivers": degenerate rectangles that duplicate a
+character. The PDF processor already filters them out when extracting; here
+they are only reported.
 """
 
-# Estados de la auditoria que no tiene sentido intentar extraer.
-NO_EXTRAIBLES = {"SIN TEXTO", "ILEGIBLE"}
-
-# Altura minima, en puntos, para que una celda de texto de un PDF se considere
-# real. La usan la auditoria (para contar astillas) y el procesador de PDF
-# (para filtrarlas al extraer).
+# Minimum height, in points, for a PDF text cell to be considered real. Used
+# by the audit (to count slivers) and by the PDF processor (to filter them
+# out when extracting).
 #
-# pypdfium2 emite de vez en cuando rectangulos degenerados: astillas de altura
-# casi nula que no contienen letra propia, pero que se solapan con el glifo
-# vecino. docling les pide su texto y acaba duplicando ese caracter (un titulo
-# '... JIT Y LEAN' sale como 'LEAN N').
+# pypdfium2 now and then emits degenerate rectangles: slivers of almost zero
+# height that hold no letter of their own, but overlap the neighbouring
+# glyph. docling asks them for their text and ends up duplicating that
+# character (a heading '... JIT Y LEAN' comes out as 'LEAN N').
 #
-# El umbral esta medido, no elegido a ojo. Sobre 477 paginas de documentos
-# reales: astillas = 0.014 pt, y el glifo legitimo mas plano (un guion) = 0.587
-# pt. 0.1 deja un factor 6 de margen por los dos lados. Subirlo hasta 1.0
-# empezaria a borrar guiones, rayas y signos menos.
-ALTURA_MINIMA_CELDA = 0.1
+# The threshold is measured, not eyeballed. Over 477 pages of real documents:
+# slivers = 0.014 pt, and the flattest legitimate glyph (a hyphen) = 0.587 pt.
+# 0.1 leaves a factor of 6 of margin on both sides. Raising it up to 1.0 would
+# start deleting hyphens, dashes and minus signs.
+MIN_CELL_HEIGHT = 0.1
 
-# Caracteres por pagina por debajo de los cuales el PDF es sospechoso.
-MINIMO_CHARS_POR_PAGINA = 50
+# Characters per page below which the page is considered to have no text
+# (same threshold as WAC_DataLib's min_chars).
+MIN_CHARS = 50
 
 
-def auditar(ruta: Path, max_paginas: int | None = None) -> dict:
-    """Revisa un PDF y devuelve sus metricas y su veredicto.
+def audit_pdf(filepath: Path, max_pages: int | None = None) -> dict:
+    """Review a PDF and return its metrics and its verdict.
 
-    'max_paginas' limita la revision a las primeras N paginas.
+    'max_pages' limits the review to the first N pages.
     """
-    fila = {
-        "fichero": ruta.name,
-        "paginas": 0,
+    row = {
+        "file": filepath.name,
+        "pages": 0,
         "chars": 0,
-        "astillas": 0,
-        "paginas_vacias": 0,
-        "estado": "",
-        "detalle": "",
+        "slivers": 0,
+        "empty_pages": 0,
+        "status": "",
+        "detail": "",
+        "error": None,  # the exception, if it could not be opened
+        "empty_page_numbers": [],
     }
     try:
-        doc = pdfium.PdfDocument(ruta)
-    except Exception as exc:
-        fila["estado"] = "ILEGIBLE"
-        fila["detalle"] = type(exc).__name__
-        return fila
+        pdf = pdfium.PdfDocument(filepath)
+    except Exception as e:
+        row["status"] = "UNREADABLE"
+        row["detail"] = type(e).__name__
+        row["error"] = e
+        return row
 
-    muestras: list[str] = []
-    vacias: list[int] = []
-    total = len(doc) if max_paginas is None else min(len(doc), max_paginas)
-    for n in range(total):
+    samples: list[str] = []
+    empty: list[int] = []
+    total = len(pdf) if max_pages is None else min(len(pdf), max_pages)
+    for n_page in range(total):
         try:
-            tp = doc[n].get_textpage()
+            textpage = pdf[n_page].get_textpage()
         except Exception:
             continue
-        fila["paginas"] += 1
-        chars_pagina = tp.count_chars()
-        fila["chars"] += chars_pagina
-        # Idea tomada de WAC_DataLib (_is_vectorial_page): una pagina con menos
-        # de unas decenas de caracteres no tiene texto util, esta escaneada.
-        if chars_pagina < MINIMO_CHARS_POR_PAGINA:
-            vacias.append(n + 1)
-        for i in range(tp.count_rects()):
-            x0, y0, x1, y1 = tp.get_rect(i)
-            if (y1 - y0) >= ALTURA_MINIMA_CELDA:
+        row["pages"] += 1
+        page_chars = textpage.count_chars()
+        row["chars"] += page_chars
+        # Idea taken from WAC_DataLib (_is_vectorial_page): a page with fewer
+        # than a few dozen characters has no useful text, it is scanned.
+        if page_chars < MIN_CHARS:
+            empty.append(n_page + 1)
+        for i in range(textpage.count_rects()):
+            x0, y0, x1, y1 = textpage.get_rect(i)
+            if (y1 - y0) >= MIN_CELL_HEIGHT:
                 continue
-            texto = tp.get_text_bounded(x0, y0, x1, y1)
-            if texto.strip():  # solo cuentan las que duplican un caracter real
-                fila["astillas"] += 1
-                if len(muestras) < 3:
-                    muestras.append(f"p.{n + 1}:{texto.strip()[:6]!r}")
+            text = textpage.get_text_bounded(x0, y0, x1, y1)
+            if text.strip():  # only those duplicating a real character count
+                row["slivers"] += 1
+                if len(samples) < 3:
+                    samples.append(f"p.{n_page + 1}:{text.strip()[:6]!r}")
 
-    fila["paginas_vacias"] = len(vacias)
-    if fila["chars"] == 0:
-        fila["estado"] = "SIN TEXTO"
-        fila["detalle"] = "escaneado: saldria vacio"
-    elif vacias:
-        # Lo peligroso de un PDF mixto es que el resto se extrae bien, asi que
-        # nada delata que esas paginas se han perdido.
-        listado = ",".join(str(p) for p in vacias[:6])
-        if len(vacias) > 6:
-            listado += f",+{len(vacias) - 6}"
-        fila["estado"] = "PAGINAS VACIAS"
-        fila["detalle"] = f"{len(vacias)}/{fila['paginas']} sin texto: p.{listado}"
+    row["empty_pages"] = len(empty)
+    row["empty_page_numbers"] = empty
+    if row["chars"] == 0:
+        row["status"] = "NO TEXT"
+        row["detail"] = "scanned: would come out empty"
+    elif empty:
+        # The danger of a mixed PDF is that the rest is extracted fine, so
+        # nothing gives away that those pages have been lost.
+        listing = ",".join(str(p) for p in empty[:6])
+        if len(empty) > 6:
+            listing += f",+{len(empty) - 6}"
+        row["status"] = "EMPTY PAGES"
+        row["detail"] = f"{len(empty)}/{row['pages']} without text: p.{listing}"
     else:
-        fila["estado"] = "OK"
-        fila["detalle"] = " ".join(muestras)
-    return fila
+        row["status"] = "OK"
+        row["detail"] = " ".join(samples)
+    return row
 
 
-# Las astillas no van al CSV: ya las filtra el procesador de PDF al extraer, asi que
-# son ruido en un informe pensado para decidir que documentos revisar.
-COLUMNAS_CSV = ["fichero", "paginas", "chars", "paginas_vacias", "estado", "detalle"]
+def validate_vectorial_pdf(filepath: Path, max_pages: int | None = None) -> dict:
+    """Check that a PDF can be extracted and return its audit.
+
+    Plays the role of DataLib's is_vectorial_pdf (utils/file.py), with two
+    differences: it tells a fully scanned PDF apart from one with only some
+    scanned pages, and instead of returning True/False it raises the
+    exception for the case. A PDF with EMPTY PAGES can be extracted: its
+    audit is returned so the caller can warn about the pages that are lost.
+
+    Raises
+    ------
+    ExtractionError
+        If the PDF cannot be opened (UNREADABLE).
+    NotVectorialError
+        If no page has a text layer (NO TEXT): scanned.
+    """
+    row = audit_pdf(filepath, max_pages)
+    if row["status"] == "UNREADABLE":
+        raise ExtractionError(f"Cannot open {filepath.name}: {row['detail']}", filepath, row["error"])
+    if row["status"] == "NO TEXT":
+        raise NotVectorialError(f"{filepath.name} has no text layer (scanned): it would come out empty", filepath)
+    return row
 
 
-def escribir_csv(filas: list[dict], destino: Path) -> None:
-    """Vuelca el informe, quedandose solo con las columnas accionables."""
-    destino.parent.mkdir(parents=True, exist_ok=True)
-    with destino.open("w", newline="", encoding="utf-8") as fh:
-        escritor = csv.DictWriter(fh, fieldnames=COLUMNAS_CSV, extrasaction="ignore")
-        escritor.writeheader()
-        escritor.writerows(filas)
-
-
-def main_auditoria() -> None:
-    parser = argparse.ArgumentParser(description=AYUDA_AUDITORIA, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("carpeta", type=Path, help="Carpeta con los PDFs a auditar")
-    parser.add_argument("--csv", type=Path, help="Guarda el informe completo en un CSV")
-    parser.add_argument("--paginas", type=int, default=None, help="Revisa solo las primeras N paginas de cada PDF")
+def main() -> None:
+    parser = argparse.ArgumentParser(description=AUDIT_HELP, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument("folder", type=Path, help="Folder with the PDFs to audit")
+    parser.add_argument("--pages", type=int, default=None, help="Review only the first N pages of each PDF")
     args = parser.parse_args()
 
-    pdfs = sorted(args.carpeta.rglob("*.pdf"))
+    pdfs = sorted(args.folder.rglob("*.pdf"))
     if not pdfs:
-        raise SystemExit(f"No hay PDFs en {args.carpeta}")
+        raise SystemExit(f"No PDFs in {args.folder}")
 
-    limite = f" (primeras {args.paginas} paginas)" if args.paginas else ""
-    print(f"Auditando {len(pdfs)} PDFs de {args.carpeta}{limite}...\n")
-    filas = [auditar(p, args.paginas) for p in pdfs]
+    limit = f" (first {args.pages} pages)" if args.pages else ""
+    print(f"Auditing {len(pdfs)} PDFs in {args.folder}{limit}...\n")
+    rows = [audit_pdf(p, args.pages) for p in pdfs]
 
-    problematicos = [f for f in filas if f["estado"] != "OK"]
-    con_astillas = [f for f in filas if f["estado"] == "OK" and f["astillas"]]
+    problematic = [r for r in rows if r["status"] != "OK"]
+    with_slivers = [r for r in rows if r["status"] == "OK" and r["slivers"]]
 
-    if problematicos:
-        print("REVISAR (no se procesaran bien):")
-        for f in problematicos:
-            print(f"  {f['estado']:11s} {f['detalle']:26s} {f['fichero']}")
-    if con_astillas:
-        print("\nCon astillas (ya corregidas por el filtro, solo informativo):")
-        for f in con_astillas:
-            print(f"  {f['astillas']:3d}  {f['detalle']:26s} {f['fichero']}")
+    if problematic:
+        print("REVIEW (will not be processed properly):")
+        for r in problematic:
+            print(f"  {r['status']:11s} {r['detail']:30s} {r['file']}")
+    if with_slivers:
+        print("\nWith slivers (already fixed by the filter, informative only):")
+        for r in with_slivers:
+            print(f"  {r['slivers']:3d}  {r['detail']:30s} {r['file']}")
 
-    paginas = sum(f["paginas"] for f in filas)
-    astillas = sum(f["astillas"] for f in filas)
-    print(f"\nResumen: {len(filas)} PDFs, {paginas} paginas")
-    print(f"  correctos : {len(filas) - len(problematicos)}")
-    print(f"  a revisar : {len(problematicos)}")
-    print(f"  astillas  : {astillas} (filtradas al extraer)")
-
-    if args.csv:
-        escribir_csv(filas, args.csv)
-        print(f"\nInforme completo: {args.csv}")
+    pages = sum(r["pages"] for r in rows)
+    slivers = sum(r["slivers"] for r in rows)
+    print(f"\nSummary: {len(rows)} PDFs, {pages} pages")
+    print(f"  correct   : {len(rows) - len(problematic)}")
+    print(f"  to review : {len(problematic)}")
+    print(f"  slivers   : {slivers} (filtered when extracting)")
 
 
 if __name__ == "__main__":
-    main_auditoria()
+    main()

@@ -1,4 +1,4 @@
-"""Extraccion de texto, imagenes y tablas de documentos PDF y Word con docling.
+"""Extraction of text, images and tables from PDF, Word and plain text documents with docling.
 
-Uso: python -m document_processor <carpeta o documento> [-o salida]
+Usage: python -m document_processor <folder or document> [-o output]
 """

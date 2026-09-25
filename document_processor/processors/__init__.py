@@ -1,2 +1,2 @@
-"""Procesadores: uno por formato de entrada. Cada uno obtiene el
-DoclingDocument de su formato y delega el resto en base.py."""
+"""Processors: one per input format. Each one obtains the DoclingDocument of
+its format and delegates the rest to base.py."""
